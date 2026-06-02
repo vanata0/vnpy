@@ -37,7 +37,6 @@ LAB_PATH = Path(__file__).resolve().parents[1] / "lab_data"
 
 # universe 名单从 2017-12 月末开始，使 IS 2018-01 起的数据有成分覆盖
 UNIVERSE_START = "2017-12-01"
-INDEX_SYMBOL = "MKTCAP500"
 
 
 def to_vt_symbol(code: str) -> str:
@@ -49,14 +48,21 @@ def to_vt_symbol(code: str) -> str:
     return f"{code}.SZSE"
 
 
-def clean_component(lab: AlphaLab) -> None:
-    """清理旧的 MKTCAP500 shelve 文件，避免重跑残留"""
-    for f in lab.component_path.glob(f"{INDEX_SYMBOL}*"):
+def clean_component(lab: AlphaLab, index_symbol: str) -> None:
+    """清理旧的同名 shelve 文件，避免重跑残留"""
+    for f in lab.component_path.glob(f"{index_symbol}*"):
         f.unlink()
 
 
-def build_universe(con: duckdb.DuckDBPyConnection, lab: AlphaLab, top_n: int, min_list_days: int) -> None:
-    """生成月度 Top-N 市值成分股"""
+def build_universe(
+    con: duckdb.DuckDBPyConnection,
+    lab: AlphaLab,
+    index_symbol: str,
+    rank_start: int,
+    rank_end: int,
+    min_list_days: int,
+) -> None:
+    """生成月度市值排名 [rank_start, rank_end] 区间的成分股(按总市值降序排名)"""
     # 取每月末交易日
     month_ends: list = (
         con.execute(
@@ -79,28 +85,30 @@ def build_universe(con: duckdb.DuckDBPyConnection, lab: AlphaLab, top_n: int, mi
         codes: list[str] = (
             con.execute(
                 """
-                SELECT d.code
-                FROM stock_daily d
-                JOIN stock_meta m ON d.code = m.code
-                WHERE d.date = ?
-                  AND d.mktcap IS NOT NULL
-                  AND (d.is_st = false OR d.is_st IS NULL)
-                  AND m.list_date <= (CAST(? AS DATE) - INTERVAL '%d' DAY)
-                ORDER BY d.mktcap DESC
-                LIMIT ?
+                WITH ranked AS (
+                    SELECT d.code, ROW_NUMBER() OVER (ORDER BY d.mktcap DESC) AS rk
+                    FROM stock_daily d
+                    JOIN stock_meta m ON d.code = m.code
+                    WHERE d.date = ?
+                      AND d.mktcap IS NOT NULL
+                      AND (d.is_st = false OR d.is_st IS NULL)
+                      AND m.list_date <= (CAST(? AS DATE) - INTERVAL '%d' DAY)
+                )
+                SELECT code FROM ranked WHERE rk >= ? AND rk <= ? ORDER BY rk
                 """ % min_list_days,
-                [me, me, top_n],
+                [me, me, rank_start, rank_end],
             )
             .fetchdf()["code"]
             .tolist()
         )
         components[me_str] = [to_vt_symbol(c) for c in codes]
 
-    clean_component(lab)
-    lab.save_component_data(INDEX_SYMBOL, components)
+    clean_component(lab, index_symbol)
+    lab.save_component_data(index_symbol, components)
 
     sizes = [len(v) for v in components.values()]
-    print(f"universe: {len(components)} 个月度快照, 每月 {min(sizes)}~{max(sizes)} 只 "
+    print(f"{index_symbol}: rank[{rank_start},{rank_end}] {len(components)} 个月度快照, "
+          f"每月 {min(sizes)}~{max(sizes)} 只 "
           f"({month_ends[0].strftime('%Y-%m')} ~ {month_ends[-1].strftime('%Y-%m')})")
 
 
@@ -155,8 +163,11 @@ def export_benchmark(con: duckdb.DuckDBPyConnection) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="构建选股 universe + benchmark")
-    parser.add_argument("--top-n", type=int, default=500, help="每月市值 Top-N")
+    parser.add_argument("--name", default="MKTCAP500", help="universe 名称(AlphaLab 虚拟指数)")
+    parser.add_argument("--rank-start", type=int, default=1, help="市值排名起(含)")
+    parser.add_argument("--rank-end", type=int, default=500, help="市值排名止(含)")
     parser.add_argument("--min-list-days", type=int, default=60, help="上市最少天数(剔新股)")
+    parser.add_argument("--skip-aux", action="store_true", help="跳过 limit_status/benchmark 导出(复用已有)")
     args = parser.parse_args()
 
     lab = AlphaLab(str(LAB_PATH))
@@ -171,9 +182,10 @@ def main() -> None:
 
     try:
         con = duckdb.connect(str(tmp_db), read_only=False)
-        build_universe(con, lab, args.top_n, args.min_list_days)
-        export_limit_status(con)
-        export_benchmark(con)
+        build_universe(con, lab, args.name, args.rank_start, args.rank_end, args.min_list_days)
+        if not args.skip_aux:
+            export_limit_status(con)
+            export_benchmark(con)
     finally:
         con.close()
         tmp_db.unlink(missing_ok=True)
