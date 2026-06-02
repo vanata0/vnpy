@@ -143,6 +143,37 @@ def add_fundamental_features(dataset: Alpha158, lab_path: Path) -> None:
     print(f"加入 {len(feat_names)} 个基本面因子: {feat_names}")
 
 
+def add_financial_features(dataset: Alpha158, lab_path: Path) -> None:
+    """
+    把 point-in-time 财务因子(成长/质量)join 到 dataset，作为额外特征。
+
+    7 个因子(净利增速/营收增速/ROE/毛利率/净利率/资产负债率/每股经营现金流)
+    按日截面 rank 到 [0,1]，方向由 LightGBM 自学。缺失填 0.5。这些是量价无法
+    隐含的正交信息(成长+质量)，区别于已证明无用的 pe/pb 粗估值。
+    """
+    fin = pl.read_parquet(lab_path / "financials.parquet")
+    raw_cols = ["np_yoy", "rev_yoy", "roe", "gross_margin", "net_margin", "debt_ratio", "ocf_ps"]
+
+    feat_names: list[str] = []
+    for c in raw_cols:
+        name = f"fin_{c}"
+        fin = fin.with_columns(
+            (pl.col(c).rank() / pl.col(c).count()).over("datetime").alias(name)
+        )
+        feat_names.append(name)
+
+    fin_feat = fin.select(["datetime", "vt_symbol", *feat_names])
+
+    for attr in ["raw_df", "infer_df", "learn_df"]:
+        df: pl.DataFrame = getattr(dataset, attr)
+        df = df.join(fin_feat, on=["datetime", "vt_symbol"], how="left")
+        df = df.with_columns([pl.col(n).fill_null(0.5) for n in feat_names])
+        cols = [c for c in df.columns if c != "label"] + ["label"]
+        setattr(dataset, attr, df.select(cols))
+
+    print(f"加入 {len(feat_names)} 个财务因子: {feat_names}")
+
+
 def quick_oos_ic(dataset: Alpha158, signal: pl.DataFrame) -> None:
     """OOS 快速 rank IC(轻量、可日志化；完整因子分析见 alpha158_analyze.py)"""
     from scipy.stats import spearmanr
@@ -171,7 +202,7 @@ def quick_oos_ic(dataset: Alpha158, signal: pl.DataFrame) -> None:
 
 
 def run(name: str, universe: str, limit: int | None, batch_size: int, workers: int,
-        fundamental: bool = False, extended_days: int = 100) -> None:
+        fundamental: bool = False, financial: bool = False, extended_days: int = 100) -> None:
     lab = AlphaLab(str(LAB_PATH))
 
     start, end = TRAIN_PERIOD[0], TEST_PERIOD[1]
@@ -191,6 +222,8 @@ def run(name: str, universe: str, limit: int | None, batch_size: int, workers: i
 
     if fundamental:
         add_fundamental_features(dataset, LAB_PATH)
+    if financial:
+        add_financial_features(dataset, LAB_PATH)
 
     lab.save_dataset(name, dataset)
     print(f"数据集已保存: {name}")
@@ -225,6 +258,7 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=200, help="分批大小")
     parser.add_argument("--workers", type=int, default=1, help="prepare_data 并行进程数")
     parser.add_argument("--fundamental", action="store_true", help="加入基本面因子(ep/bp/换手率/量比)")
+    parser.add_argument("--financial", action="store_true", help="加入财务因子(成长/质量，point-in-time)")
     args = parser.parse_args()
 
     run(
@@ -234,6 +268,7 @@ def main() -> None:
         batch_size=args.batch_size,
         workers=args.workers,
         fundamental=args.fundamental,
+        financial=args.financial,
     )
 
 
