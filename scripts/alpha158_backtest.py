@@ -24,8 +24,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from vnpy.alpha import AlphaLab
 from vnpy.alpha.strategy import BacktestingEngine
-from vnpy.alpha.strategy.strategies.equity_demo_strategy import EquityDemoStrategy
 from vnpy.trader.constant import Interval
+
+from robust_strategy import RobustEquityStrategy
 
 LAB_PATH = Path(__file__).resolve().parents[1] / "lab_data"
 BENCHMARK = "000300.SSE"
@@ -124,7 +125,7 @@ def run(name: str, top_k: int, n_drop: int, min_days: int, capital: int, filter_
         capital=capital,
     )
     engine.add_strategy(
-        EquityDemoStrategy,
+        RobustEquityStrategy,
         {"top_k": top_k, "n_drop": n_drop, "min_days": min_days},
         signal,
     )
