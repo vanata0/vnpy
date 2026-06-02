@@ -15,7 +15,7 @@ MVP 边界：跌停卖不出未特殊处理(已在 plan 声明)。
 import argparse
 import json
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import polars as pl
@@ -68,6 +68,31 @@ def apply_limit_filter(signal: pl.DataFrame) -> pl.DataFrame:
     return signal.join(up, on=["datetime", "vt_symbol"], how="anti")
 
 
+def apply_regime_filter(signal: pl.DataFrame, lab: AlphaLab, ma_window: int) -> pl.DataFrame:
+    """
+    市场择时门控：沪深300 跌破 MA 的次日空仓(清空当日 signal → 策略清仓)。
+    无前瞻：t 日收盘判断 risk_on，平移一日对齐执行日 t+1，与 signal T+1 口径一致。
+    """
+    smin = signal["datetime"].min()
+    smax = signal["datetime"].max()
+    bars = lab.load_bar_data(BENCHMARK, Interval.DAILY,
+                             smin - timedelta(days=ma_window * 2 + 30), smax)
+    bench = pl.DataFrame({
+        "datetime": [b.datetime for b in bars],
+        "close": [b.close_price for b in bars],
+    }).sort("datetime")
+    bench = bench.with_columns(pl.col("close").rolling_mean(ma_window).alias("ma"))
+    bench = bench.with_columns((pl.col("close") > pl.col("ma")).alias("risk_on"))
+    bench = bench.with_columns(pl.col("risk_on").shift(1).alias("risk_on_exec"))
+    risk_off = bench.filter(pl.col("risk_on_exec") == False)["datetime"]  # noqa: E712
+
+    total_days = signal["datetime"].n_unique()
+    filtered = signal.filter(~pl.col("datetime").is_in(risk_off))
+    kept = filtered["datetime"].n_unique()
+    print(f"市场择时(沪深300 MA{ma_window}): 空仓 {total_days - kept}/{total_days} 交易日，持仓 {kept} 日")
+    return filtered
+
+
 def write_contracts(lab: AlphaLab, vt_symbols: list[str]) -> None:
     """一次性写入所有股票的合约配置(避免逐只 add_contract_setting 的 O(n^2) IO)"""
     contracts = {
@@ -94,6 +119,7 @@ def benchmark_excess(lab: AlphaLab, daily_df: pl.DataFrame, capital: int, start:
 
 
 def run(name: str, top_k: int, n_drop: int, min_days: int, capital: int, filter_limit: bool, t1: bool,
+        regime: bool = False, ma_window: int = 60,
         start: datetime = OOS_START, end: datetime = OOS_END) -> None:
     lab = AlphaLab(str(LAB_PATH))
     signal = lab.load_signal(name)
@@ -104,6 +130,9 @@ def run(name: str, top_k: int, n_drop: int, min_days: int, capital: int, filter_
     if t1:
         signal = shift_signal_t1(signal)
         print("T+1 平移: 信号延迟到次日开盘执行(消除未来函数)")
+
+    if regime:
+        signal = apply_regime_filter(signal, lab, ma_window)
 
     if filter_limit:
         before = len(signal)
@@ -149,6 +178,8 @@ def main() -> None:
     parser.add_argument("--capital", type=int, default=100_000_000, help="初始资金")
     parser.add_argument("--filter-limit", action="store_true", help="启用涨停过滤")
     parser.add_argument("--t1", action="store_true", help="T+1 开盘成交(消除未来函数)")
+    parser.add_argument("--regime", action="store_true", help="市场择时门控(沪深300 跌破 MA 空仓)")
+    parser.add_argument("--ma-window", type=int, default=60, help="择时均线窗口")
     parser.add_argument("--start", default=None, help="回测起始日(YYYY-MM-DD)，默认 2025-01-01")
     parser.add_argument("--end", default=None, help="回测结束日(YYYY-MM-DD)，默认 2026-05-29")
     args = parser.parse_args()
@@ -164,6 +195,8 @@ def main() -> None:
         capital=args.capital,
         filter_limit=args.filter_limit,
         t1=args.t1,
+        regime=args.regime,
+        ma_window=args.ma_window,
         start=start,
         end=end,
     )
