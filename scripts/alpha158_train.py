@@ -109,6 +109,40 @@ def compute_dataset_batched(
     return shell
 
 
+def add_fundamental_features(dataset: Alpha158, lab_path: Path) -> None:
+    """
+    把基本面因子 join 到 dataset 的 raw_df/infer_df/learn_df，作为额外特征。
+
+    pe/pb 取倒数(ep=1/pe 盈利收益率、bp=1/pb)以线性化并合理处理负值；
+    全部按日截面 rank 到 [0,1]，对极端值稳健、量级统一。缺失填 0.5(中性)。
+    label 重排到末尾，保证 LgbModel 的 columns[2:-1] 取到全部因子。
+    """
+    fund = pl.read_parquet(lab_path / "fundamental.parquet")
+    fund = fund.with_columns(
+        pl.when(pl.col("pe").abs() > 1e-6).then(1.0 / pl.col("pe")).otherwise(None).alias("ep"),
+        pl.when(pl.col("pb").abs() > 1e-6).then(1.0 / pl.col("pb")).otherwise(None).alias("bp"),
+    )
+
+    feat_names: list[str] = []
+    for c in ["ep", "bp", "turnover_rate", "vol_ratio"]:
+        name = f"f_{c}"
+        fund = fund.with_columns(
+            (pl.col(c).rank() / pl.col(c).count()).over("datetime").alias(name)
+        )
+        feat_names.append(name)
+
+    fund_feat = fund.select(["datetime", "vt_symbol", *feat_names])
+
+    for attr in ["raw_df", "infer_df", "learn_df"]:
+        df: pl.DataFrame = getattr(dataset, attr)
+        df = df.join(fund_feat, on=["datetime", "vt_symbol"], how="left")
+        df = df.with_columns([pl.col(n).fill_null(0.5) for n in feat_names])
+        cols = [c for c in df.columns if c != "label"] + ["label"]
+        setattr(dataset, attr, df.select(cols))
+
+    print(f"加入 {len(feat_names)} 个基本面因子: {feat_names}")
+
+
 def quick_oos_ic(dataset: Alpha158, signal: pl.DataFrame) -> None:
     """OOS 快速 rank IC(轻量、可日志化；完整因子分析见 alpha158_analyze.py)"""
     from scipy.stats import spearmanr
@@ -136,7 +170,8 @@ def quick_oos_ic(dataset: Alpha158, signal: pl.DataFrame) -> None:
           f"ICIR={icir:+.3f}  IC>0={np.mean(arr > 0):.1%}  天数={len(arr)}")
 
 
-def run(name: str, universe: str, limit: int | None, batch_size: int, workers: int, extended_days: int = 100) -> None:
+def run(name: str, universe: str, limit: int | None, batch_size: int, workers: int,
+        fundamental: bool = False, extended_days: int = 100) -> None:
     lab = AlphaLab(str(LAB_PATH))
 
     start, end = TRAIN_PERIOD[0], TEST_PERIOD[1]
@@ -153,6 +188,9 @@ def run(name: str, universe: str, limit: int | None, batch_size: int, workers: i
     t1 = time.monotonic()
     dataset = compute_dataset_batched(lab, symbols, filters, extended_days, batch_size, workers)
     print(f"因子计算+组装完成，耗时 {time.monotonic()-t1:.1f}s")
+
+    if fundamental:
+        add_fundamental_features(dataset, LAB_PATH)
 
     lab.save_dataset(name, dataset)
     print(f"数据集已保存: {name}")
@@ -186,6 +224,7 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=None, help="限制股票数(测试用)")
     parser.add_argument("--batch-size", type=int, default=200, help="分批大小")
     parser.add_argument("--workers", type=int, default=1, help="prepare_data 并行进程数")
+    parser.add_argument("--fundamental", action="store_true", help="加入基本面因子(ep/bp/换手率/量比)")
     args = parser.parse_args()
 
     run(
@@ -194,6 +233,7 @@ def main() -> None:
         limit=args.limit,
         batch_size=args.batch_size,
         workers=args.workers,
+        fundamental=args.fundamental,
     )
 
 
