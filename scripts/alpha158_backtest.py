@@ -38,6 +38,28 @@ LONG_RATE = 0.0005
 SHORT_RATE = 0.0015
 
 
+def shift_signal_t1(signal: pl.DataFrame) -> pl.DataFrame:
+    """
+    将 signal 平移到下一交易日，消除未来函数。
+
+    引擎用开盘价成交(trade_price=min(order_price, open))。原始 signal[t] 基于
+    t 日收盘后的因子，若在 t 日开盘成交即用了未来信息。平移后 signal[t] 标记为
+    t+1，在 t+1 开盘执行 —— 收盘出信号、次日开盘交易，真实可实现。
+    """
+    dates = signal["datetime"].unique().sort().to_list()
+    map_df = pl.DataFrame({
+        "datetime": dates[:-1],
+        "_next": dates[1:],
+    }).with_columns(pl.col("datetime").cast(signal["datetime"].dtype),
+                    pl.col("_next").cast(signal["datetime"].dtype))
+    return (
+        signal.join(map_df, on="datetime", how="inner")
+        .drop("datetime")
+        .rename({"_next": "datetime"})
+        .select(["datetime", "vt_symbol", "signal"])
+    )
+
+
 def apply_limit_filter(signal: pl.DataFrame) -> pl.DataFrame:
     """剔除当日涨停股的 signal 行(买不进)"""
     limit = pl.read_parquet(LAB_PATH / "limit_status.parquet")
@@ -70,12 +92,16 @@ def benchmark_excess(lab: AlphaLab, daily_df: pl.DataFrame, capital: int) -> Non
     print(f"超额收益:        {strat_total - bench_total:+.2%}")
 
 
-def run(name: str, top_k: int, n_drop: int, min_days: int, capital: int, filter_limit: bool) -> None:
+def run(name: str, top_k: int, n_drop: int, min_days: int, capital: int, filter_limit: bool, t1: bool) -> None:
     lab = AlphaLab(str(LAB_PATH))
     signal = lab.load_signal(name)
     if signal is None:
         print(f"ERROR: 找不到信号 {name}")
         sys.exit(1)
+
+    if t1:
+        signal = shift_signal_t1(signal)
+        print("T+1 平移: 信号延迟到次日开盘执行(消除未来函数)")
 
     if filter_limit:
         before = len(signal)
@@ -120,6 +146,7 @@ def main() -> None:
     parser.add_argument("--min-days", type=int, default=3, help="最短持有天数")
     parser.add_argument("--capital", type=int, default=100_000_000, help="初始资金")
     parser.add_argument("--filter-limit", action="store_true", help="启用涨停过滤")
+    parser.add_argument("--t1", action="store_true", help="T+1 开盘成交(消除未来函数)")
     args = parser.parse_args()
 
     run(
@@ -129,6 +156,7 @@ def main() -> None:
         min_days=args.min_days,
         capital=args.capital,
         filter_limit=args.filter_limit,
+        t1=args.t1,
     )
 
 
