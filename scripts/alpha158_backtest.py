@@ -77,22 +77,23 @@ def write_contracts(lab: AlphaLab, vt_symbols: list[str]) -> None:
         json.dump(contracts, f, indent=2)
 
 
-def benchmark_excess(lab: AlphaLab, daily_df: pl.DataFrame, capital: int) -> None:
+def benchmark_excess(lab: AlphaLab, daily_df: pl.DataFrame, capital: int, start: datetime, end: datetime) -> None:
     """对标沪深300 计算超额收益(daily_df 仅含 *_pnl 列，用 net_pnl 累计)"""
-    bars = lab.load_bar_data(BENCHMARK, Interval.DAILY, OOS_START, OOS_END)
+    bars = lab.load_bar_data(BENCHMARK, Interval.DAILY, start, end)
     if not bars:
         print("benchmark 数据缺失，跳过超额计算")
         return
 
     strat_total = daily_df["net_pnl"].sum() / capital
     bench_total = bars[-1].close_price / bars[0].close_price - 1
-    print("\n=== 对标沪深300 超额(OOS 2025-01~2026-05)===")
+    print(f"\n=== 对标沪深300 超额({start.date()}~{end.date()})===")
     print(f"策略总收益(净):  {strat_total:+.2%}")
     print(f"沪深300同期:     {bench_total:+.2%}")
     print(f"超额收益:        {strat_total - bench_total:+.2%}")
 
 
-def run(name: str, top_k: int, n_drop: int, min_days: int, capital: int, filter_limit: bool, t1: bool) -> None:
+def run(name: str, top_k: int, n_drop: int, min_days: int, capital: int, filter_limit: bool, t1: bool,
+        start: datetime = OOS_START, end: datetime = OOS_END) -> None:
     lab = AlphaLab(str(LAB_PATH))
     signal = lab.load_signal(name)
     if signal is None:
@@ -118,8 +119,8 @@ def run(name: str, top_k: int, n_drop: int, min_days: int, capital: int, filter_
     engine.set_parameters(
         vt_symbols=vt_symbols,
         interval=Interval.DAILY,
-        start=OOS_START,
-        end=OOS_END,
+        start=start,
+        end=end,
         capital=capital,
     )
     engine.add_strategy(
@@ -135,7 +136,7 @@ def run(name: str, top_k: int, n_drop: int, min_days: int, capital: int, filter_
         return
     engine.calculate_statistics()
 
-    benchmark_excess(lab, daily_df, capital)
+    benchmark_excess(lab, daily_df, capital, start, end)
 
 
 def main() -> None:
@@ -147,7 +148,12 @@ def main() -> None:
     parser.add_argument("--capital", type=int, default=100_000_000, help="初始资金")
     parser.add_argument("--filter-limit", action="store_true", help="启用涨停过滤")
     parser.add_argument("--t1", action="store_true", help="T+1 开盘成交(消除未来函数)")
+    parser.add_argument("--start", default=None, help="回测起始日(YYYY-MM-DD)，默认 2025-01-01")
+    parser.add_argument("--end", default=None, help="回测结束日(YYYY-MM-DD)，默认 2026-05-29")
     args = parser.parse_args()
+
+    start = datetime.strptime(args.start, "%Y-%m-%d") if args.start else OOS_START
+    end = datetime.strptime(args.end, "%Y-%m-%d") if args.end else OOS_END
 
     run(
         name=args.name,
@@ -157,6 +163,8 @@ def main() -> None:
         capital=args.capital,
         filter_limit=args.filter_limit,
         t1=args.t1,
+        start=start,
+        end=end,
     )
 
 
