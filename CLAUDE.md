@@ -64,7 +64,7 @@ python -c "import polars, lightgbm, alphalens; print('OK')"
 | vnpy 字段 | stock_new 来源 | 备注 |
 |-----------|---------------|------|
 | `datetime` | `stock_daily.date` | 转 datetime |
-| `vt_symbol` | `stock_daily.code` | 格式转换见下 |
+| `vt_symbol` | `stock_daily.code` | 格式转换见下（结果如 `600001.SSE`） |
 | `open/high/low/close` | 直接对应 | 前复权用 `*_qfq` 字段 |
 | `volume` | `stock_daily.volume` | 直接对应 |
 | `vwap` | `amount / volume` | 无精确 vwap，估算 |
@@ -74,10 +74,13 @@ python -c "import polars, lightgbm, alphalens; print('OK')"
 **symbol 格式转换**：
 ```python
 def to_vt_symbol(code: str) -> str:
-    if code.startswith(('8', '4')): return f"BJ.{code}"
-    if code.startswith('6'):        return f"SH.{code}"
-    return f"SZ.{code}"
+    if code.startswith(("8", "9")): return f"{code}.BSE"
+    if code.startswith("6"):        return f"{code}.SSE"
+    return f"{code}.SZSE"
 ```
+
+注意：vnpy 的 vt_symbol 格式是 `{code}.{Exchange}`（如 `600001.SSE`），**不是** `SH.600001`。
+`extract_vt_symbol` 用 `rsplit(".", 1)` 解析，最后一段必须是合法的 `Exchange` 枚举值（SSE / SZSE / BSE）。
 
 **stock_new DuckDB 路径**：`/home/oracle/stock_new/data/db/market.duckdb`
 注意：stock_new 后端运行时持有写锁，脚本用 `read_only=True` 或先复制文件。
