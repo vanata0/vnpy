@@ -118,6 +118,26 @@ def benchmark_excess(lab: AlphaLab, daily_df: pl.DataFrame, capital: int, start:
     print(f"超额收益:        {strat_total - bench_total:+.2%}")
 
 
+def save_curve(name: str, daily_df: pl.DataFrame, lab: AlphaLab, capital: int,
+               start: datetime, end: datetime) -> None:
+    """存净值曲线(策略 vs 沪深300，归一化到 1.0)供 dashboard 展示"""
+    results_dir = LAB_PATH / "results"
+    results_dir.mkdir(exist_ok=True)
+    df = daily_df.sort("date")
+    nav = ((capital + df["net_pnl"].cum_sum()) / capital).to_list()
+    dates = df["date"].to_list()
+
+    bars = lab.load_bar_data(BENCHMARK, Interval.DAILY, start, end)
+    bmap = {b.datetime.date(): b.close_price for b in bars}
+    bench_raw = [bmap.get(d) for d in dates]
+    b0 = next((x for x in bench_raw if x), None)
+    bench = [x / b0 if (x and b0) else None for x in bench_raw]
+
+    out = results_dir / f"{name}_curve.parquet"
+    pl.DataFrame({"date": dates, "strat": nav, "bench": bench}).write_parquet(str(out))
+    print(f"净值曲线已存: {out.name}")
+
+
 def run(name: str, top_k: int, n_drop: int, min_days: int, capital: int, filter_limit: bool, t1: bool,
         regime: bool = False, ma_window: int = 60,
         start: datetime = OOS_START, end: datetime = OOS_END) -> None:
@@ -167,6 +187,7 @@ def run(name: str, top_k: int, n_drop: int, min_days: int, capital: int, filter_
     engine.calculate_statistics()
 
     benchmark_excess(lab, daily_df, capital, start, end)
+    save_curve(name, daily_df, lab, capital, start, end)
 
 
 def main() -> None:

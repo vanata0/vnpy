@@ -1,0 +1,12 @@
+{
+  "updated": "2026-06-03",
+  "oos_period": "2023-01 ~ 2026-05 (3.5年滚动 walk-forward, T+1 开盘成交, 涨停过滤)",
+  "benchmark": "沪深300 同期 +26.4%",
+  "schemes": [
+    {"name": "大盘 MKTCAP500", "factors": "Alpha158 (纯量价)", "sharpe": 0.72, "excess": 0.243, "annual": 0.148, "maxdd": -0.275, "calmar": 1.71, "note": "基准"},
+    {"name": "中盘 CSI500P", "factors": "Alpha158 (纯量价)", "sharpe": 0.78, "excess": 0.347, "annual": 0.178, "maxdd": -0.281, "calmar": 1.97, "note": "纯量价天花板"},
+    {"name": "中盘 + MA60 择时", "factors": "Alpha158 + 市场择时", "sharpe": 0.71, "excess": 0.191, "annual": 0.133, "maxdd": -0.167, "calmar": 1.93, "note": "控回撤但降 Sharpe"},
+    {"name": "中盘 + 粗基本面", "factors": "+ pe/pb/换手率/量比", "sharpe": 0.68, "excess": 0.337, "annual": 0.175, "maxdd": -0.357, "calmar": 1.55, "note": "估值已被量价隐含, 引噪声"},
+    {"name": "中盘 + 财务因子", "factors": "+ 成长/质量 (point-in-time)", "sharpe": 0.85, "excess": 0.447, "annual": 0.207, "maxdd": -0.280, "calmar": 2.31, "note": "✅ 全局最优"}
+  ]
+}
