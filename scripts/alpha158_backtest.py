@@ -1,0 +1,136 @@
+"""
+选股交易回测(Phase 5)
+
+用法：
+    source /home/oracle/vnpy-venv/bin/activate
+    python scripts/alpha158_backtest.py --name a158_mktcap500
+    python scripts/alpha158_backtest.py --name a158_mktcap500 --filter-limit   # 启用涨停过滤
+
+输出：策略年化/Sharpe/最大回撤 + 对标沪深300 的超额收益。
+
+涨跌停过滤(--filter-limit)：剔除当日涨停股的 signal(买不进)。
+MVP 边界：跌停卖不出未特殊处理(已在 plan 声明)。
+"""
+
+import argparse
+import json
+import sys
+from datetime import datetime
+from pathlib import Path
+
+import polars as pl
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from vnpy.alpha import AlphaLab
+from vnpy.alpha.strategy import BacktestingEngine
+from vnpy.alpha.strategy.strategies.equity_demo_strategy import EquityDemoStrategy
+from vnpy.trader.constant import Interval
+
+LAB_PATH = Path(__file__).resolve().parents[1] / "lab_data"
+BENCHMARK = "000300.SSE"
+
+OOS_START = datetime(2025, 1, 1)
+OOS_END = datetime(2026, 5, 29)
+
+# A股交易成本: 买入佣金万5; 卖出佣金万5+印花税千1; 股票 size=1, pricetick=0.01
+LONG_RATE = 0.0005
+SHORT_RATE = 0.0015
+
+
+def apply_limit_filter(signal: pl.DataFrame) -> pl.DataFrame:
+    """剔除当日涨停股的 signal 行(买不进)"""
+    limit = pl.read_parquet(LAB_PATH / "limit_status.parquet")
+    up = limit.filter(pl.col("is_limitup")).select(["datetime", "vt_symbol"])
+    return signal.join(up, on=["datetime", "vt_symbol"], how="anti")
+
+
+def write_contracts(lab: AlphaLab, vt_symbols: list[str]) -> None:
+    """一次性写入所有股票的合约配置(避免逐只 add_contract_setting 的 O(n^2) IO)"""
+    contracts = {
+        s: {"long_rate": LONG_RATE, "short_rate": SHORT_RATE, "size": 1, "pricetick": 0.01}
+        for s in vt_symbols
+    }
+    with open(lab.contract_path, "w", encoding="UTF-8") as f:
+        json.dump(contracts, f, indent=2)
+
+
+def benchmark_excess(lab: AlphaLab, daily_df: pl.DataFrame, capital: int) -> None:
+    """对标沪深300 计算超额收益(daily_df 仅含 *_pnl 列，用 net_pnl 累计)"""
+    bars = lab.load_bar_data(BENCHMARK, Interval.DAILY, OOS_START, OOS_END)
+    if not bars:
+        print("benchmark 数据缺失，跳过超额计算")
+        return
+
+    strat_total = daily_df["net_pnl"].sum() / capital
+    bench_total = bars[-1].close_price / bars[0].close_price - 1
+    print("\n=== 对标沪深300 超额(OOS 2025-01~2026-05)===")
+    print(f"策略总收益(净):  {strat_total:+.2%}")
+    print(f"沪深300同期:     {bench_total:+.2%}")
+    print(f"超额收益:        {strat_total - bench_total:+.2%}")
+
+
+def run(name: str, top_k: int, n_drop: int, min_days: int, capital: int, filter_limit: bool) -> None:
+    lab = AlphaLab(str(LAB_PATH))
+    signal = lab.load_signal(name)
+    if signal is None:
+        print(f"ERROR: 找不到信号 {name}")
+        sys.exit(1)
+
+    if filter_limit:
+        before = len(signal)
+        signal = apply_limit_filter(signal)
+        print(f"涨停过滤: {before:,} → {len(signal):,} 行")
+
+    vt_symbols = signal["vt_symbol"].unique().to_list()
+    print(f"回测股票池: {len(vt_symbols)} 只 | top_k={top_k} n_drop={n_drop} min_days={min_days} "
+          f"capital={capital:,}")
+
+    write_contracts(lab, vt_symbols)
+
+    engine = BacktestingEngine(lab)
+    engine.set_parameters(
+        vt_symbols=vt_symbols,
+        interval=Interval.DAILY,
+        start=OOS_START,
+        end=OOS_END,
+        capital=capital,
+    )
+    engine.add_strategy(
+        EquityDemoStrategy,
+        {"top_k": top_k, "n_drop": n_drop, "min_days": min_days},
+        signal,
+    )
+    engine.load_data()
+    engine.run_backtesting()
+    daily_df = engine.calculate_result()
+    if daily_df is None:
+        print("回测无成交记录")
+        return
+    engine.calculate_statistics()
+
+    benchmark_excess(lab, daily_df, capital)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="选股交易回测")
+    parser.add_argument("--name", default="a158_mktcap500", help="信号名称")
+    parser.add_argument("--top-k", type=int, default=50, help="最大持仓数")
+    parser.add_argument("--n-drop", type=int, default=5, help="每次换仓卖出数")
+    parser.add_argument("--min-days", type=int, default=3, help="最短持有天数")
+    parser.add_argument("--capital", type=int, default=100_000_000, help="初始资金")
+    parser.add_argument("--filter-limit", action="store_true", help="启用涨停过滤")
+    args = parser.parse_args()
+
+    run(
+        name=args.name,
+        top_k=args.top_k,
+        n_drop=args.n_drop,
+        min_days=args.min_days,
+        capital=args.capital,
+        filter_limit=args.filter_limit,
+    )
+
+
+if __name__ == "__main__":
+    main()
