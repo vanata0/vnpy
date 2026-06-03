@@ -14,9 +14,20 @@ from vnpy.alpha.strategy.strategies.equity_demo_strategy import EquityDemoStrate
 
 
 class RobustEquityStrategy(EquityDemoStrategy):
-    """过滤当天无 bar 股票的健壮版长多策略"""
+    """过滤当天无 bar 股票的健壮版长多策略,支持 N 日调仓周期"""
+
+    rebalance_days: int = 1  # 每 N 个交易日调仓一次(1=每日);非调仓日持仓不动,让 N 日 alpha 兑现
+
+    def on_init(self) -> None:
+        super().on_init()
+        self._rebal_count: int = 0
 
     def on_bars(self, bars: dict[str, BarData]) -> None:
+        # 调仓周期控制:非调仓日保持持仓不动
+        self._rebal_count += 1
+        if self.rebalance_days > 1 and (self._rebal_count - 1) % self.rebalance_days != 0:
+            return
+
         # 获取最新信号并排序
         last_signal: pl.DataFrame = self.get_signal()
         last_signal = last_signal.sort("signal", descending=True)

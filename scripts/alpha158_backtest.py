@@ -139,7 +139,7 @@ def save_curve(name: str, daily_df: pl.DataFrame, lab: AlphaLab, capital: int,
 
 
 def run(name: str, top_k: int, n_drop: int, min_days: int, capital: int, filter_limit: bool, t1: bool,
-        regime: bool = False, ma_window: int = 60,
+        regime: bool = False, ma_window: int = 60, rebalance_days: int = 1,
         start: datetime = OOS_START, end: datetime = OOS_END) -> None:
     lab = AlphaLab(str(LAB_PATH))
     signal = lab.load_signal(name)
@@ -175,7 +175,7 @@ def run(name: str, top_k: int, n_drop: int, min_days: int, capital: int, filter_
     )
     engine.add_strategy(
         RobustEquityStrategy,
-        {"top_k": top_k, "n_drop": n_drop, "min_days": min_days},
+        {"top_k": top_k, "n_drop": n_drop, "min_days": min_days, "rebalance_days": rebalance_days},
         signal,
     )
     engine.load_data()
@@ -201,6 +201,7 @@ def main() -> None:
     parser.add_argument("--t1", action="store_true", help="T+1 开盘成交(消除未来函数)")
     parser.add_argument("--regime", action="store_true", help="市场择时门控(沪深300 跌破 MA 空仓)")
     parser.add_argument("--ma-window", type=int, default=60, help="择时均线窗口")
+    parser.add_argument("--rebalance-days", type=int, default=1, help="调仓周期(每 N 日调仓,1=每日)")
     parser.add_argument("--start", default=None, help="回测起始日(YYYY-MM-DD)，默认 2025-01-01")
     parser.add_argument("--end", default=None, help="回测结束日(YYYY-MM-DD)，默认 2026-05-29")
     args = parser.parse_args()
@@ -218,6 +219,7 @@ def main() -> None:
         t1=args.t1,
         regime=args.regime,
         ma_window=args.ma_window,
+        rebalance_days=args.rebalance_days,
         start=start,
         end=end,
     )

@@ -50,6 +50,7 @@ def compute_dataset_batched(
     extended_days: int,
     batch_size: int,
     workers: int,
+    label_fwd: int = 2,
 ) -> Alpha158:
     """
     分批计算 Alpha158 因子并重组成单个 dataset。
@@ -76,6 +77,8 @@ def compute_dataset_batched(
         last_df = df
 
         ds = Alpha158(df, **periods)
+        if label_fwd != 2:  # 脚本层覆盖默认 2 日 label(不改核心模块)
+            ds.set_label(f"ts_delay(close, -{label_fwd + 1}) / ts_delay(close, -1) - 1")
         batch_filters = {s: filters[s] for s in batch if s in filters}
         ds.prepare_data(filters=batch_filters or None, max_workers=workers)
 
@@ -202,7 +205,8 @@ def quick_oos_ic(dataset: Alpha158, signal: pl.DataFrame) -> None:
 
 
 def run(name: str, universe: str, limit: int | None, batch_size: int, workers: int,
-        fundamental: bool = False, financial: bool = False, extended_days: int = 100) -> None:
+        fundamental: bool = False, financial: bool = False, label_fwd: int = 2,
+        extended_days: int = 100) -> None:
     lab = AlphaLab(str(LAB_PATH))
 
     start, end = TRAIN_PERIOD[0], TEST_PERIOD[1]
@@ -217,7 +221,7 @@ def run(name: str, universe: str, limit: int | None, batch_size: int, workers: i
 
     # 分批因子计算 + 数据集组装
     t1 = time.monotonic()
-    dataset = compute_dataset_batched(lab, symbols, filters, extended_days, batch_size, workers)
+    dataset = compute_dataset_batched(lab, symbols, filters, extended_days, batch_size, workers, label_fwd)
     print(f"因子计算+组装完成，耗时 {time.monotonic()-t1:.1f}s")
 
     if fundamental:
@@ -259,6 +263,7 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=1, help="prepare_data 并行进程数")
     parser.add_argument("--fundamental", action="store_true", help="加入基本面因子(ep/bp/换手率/量比)")
     parser.add_argument("--financial", action="store_true", help="加入财务因子(成长/质量，point-in-time)")
+    parser.add_argument("--hold", type=int, default=2, help="持有天数(label 周期)，默认 2 日")
     args = parser.parse_args()
 
     run(
@@ -269,6 +274,7 @@ def main() -> None:
         workers=args.workers,
         fundamental=args.fundamental,
         financial=args.financial,
+        label_fwd=args.hold,
     )
 
 
