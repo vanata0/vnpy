@@ -40,7 +40,7 @@ LAB_PATH = Path(__file__).resolve().parents[1] / "lab_data"
 
 TRAIN_PERIOD = ("2018-01-01", "2023-12-31")
 VALID_PERIOD = ("2024-01-01", "2024-12-31")
-TEST_PERIOD = ("2025-01-01", "2026-05-29")
+TEST_PERIOD = ("2025-01-01", "2026-06-02")
 
 
 def compute_dataset_batched(
