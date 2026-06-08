@@ -38,8 +38,15 @@ WINDOWS = [
     {"name": "W1", "train": ("2018-01-01", "2021-12-31"), "valid": ("2022-01-01", "2022-12-31"), "test": ("2023-01-01", "2023-12-31")},
     {"name": "W2", "train": ("2018-01-01", "2022-12-31"), "valid": ("2023-01-01", "2023-12-31"), "test": ("2024-01-01", "2024-12-31")},
     {"name": "W3", "train": ("2018-01-01", "2023-12-31"), "valid": ("2024-01-01", "2024-12-31"), "test": ("2025-01-01", "2025-12-31")},
-    {"name": "W4", "train": ("2018-01-01", "2024-12-31"), "valid": ("2025-01-01", "2025-12-31"), "test": ("2026-01-01", "2026-06-02")},
+    {"name": "W4", "train": ("2018-01-01", "2024-12-31"), "valid": ("2025-01-01", "2025-12-31"), "test": ("2026-01-01", "2026-06-04")},
 ]
+
+
+def build_windows(w4_end: str | None = None) -> list[dict]:
+    ws = [w.copy() for w in WINDOWS]
+    if w4_end:
+        ws[-1] = {**ws[-1], "test": (ws[-1]["test"][0], w4_end)}
+    return ws
 
 
 def daily_rank_ic(signal: pl.DataFrame, learn_test: pl.DataFrame) -> dict:
@@ -72,6 +79,7 @@ def daily_rank_ic(signal: pl.DataFrame, learn_test: pl.DataFrame) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description="滚动 OOS 验证")
     parser.add_argument("--base", default="a158_mktcap500", help="已训练的全量 dataset 名")
+    parser.add_argument("--w4-end", default=None, help="覆盖 W4 测试期终止日(增量推理用，格式 YYYY-MM-DD)")
     args = parser.parse_args()
 
     lab = AlphaLab(str(LAB_PATH))
@@ -80,10 +88,12 @@ def main() -> None:
         print(f"ERROR: 找不到 dataset {args.base}")
         sys.exit(1)
 
+    windows = build_windows(args.w4_end)
+
     rows: list[dict] = []
     oos_signals: list[pl.DataFrame] = []
 
-    for w in WINDOWS:
+    for w in windows:
         # 改时间切分(因子矩阵复用)，重训
         dataset.data_periods = {
             Segment.TRAIN: w["train"],
