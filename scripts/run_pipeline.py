@@ -4,7 +4,7 @@
 用法：
     source /home/oracle/vnpy-venv/bin/activate
     python scripts/run_pipeline.py            # 全流程(~30分钟)
-    python scripts/run_pipeline.py --from 4   # 从第4步(训练)开始,跳过数据/因子重建
+    python scripts/run_pipeline.py --from 5   # 从第5步(训练)开始,跳过数据/因子重建
 
 更新最新数据时：bridge/universe/financials 自动含最新交易日;但 train.py 的
 TEST_PERIOD、rolling.py 的 W4 test、本文件 END_DATE 三处需同步改到最新交易日。
@@ -18,15 +18,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PY = "/home/oracle/vnpy-venv/bin/python"
-END_DATE = "2026-06-02"  # 最新交易日;与 train.py TEST_PERIOD / rolling.py W4 保持一致
+END_DATE = "2026-06-04"  # 最新交易日;与 train.py TEST_PERIOD / rolling.py W4 保持一致
 
 STEPS: list[tuple[str, list[str]]] = [
     ("数据桥 DuckDB→parquet", ["scripts/alpha158_bridge.py"]),
-    ("universe 中盘 CSI500P", ["scripts/build_universe.py", "--name", "CSI500P", "--rank-start", "301", "--rank-end", "800"]),
+    ("指数 benchmark + 官方成分股", ["scripts/fetch_index_tushare.py"]),
     ("财务因子 point-in-time", ["scripts/export_financials.py"]),
-    ("训练 LightGBM (~28min)", ["scripts/alpha158_train.py", "--name", "a158_csi500p_fin", "--universe", "CSI500P", "--batch-size", "200", "--workers", "6", "--financial"]),
-    ("滚动 OOS 验证", ["scripts/alpha158_rolling.py", "--base", "a158_csi500p_fin"]),
-    ("回测 + 净值曲线", ["scripts/alpha158_backtest.py", "--name", "a158_csi500p_fin_rolling", "--start", "2023-01-01", "--end", END_DATE, "--t1", "--filter-limit"]),
+    ("行业分类导出", ["scripts/export_industry.py"]),
+    ("训练 LightGBM (~35min)", ["scripts/alpha158_train.py", "--name", "a158_csi500_fin", "--universe", "CSI500", "--batch-size", "100", "--workers", "4", "--financial"]),
+    ("滚动 OOS 验证", ["scripts/alpha158_rolling.py", "--base", "a158_csi500_fin"]),
+    ("回测 + 净值曲线", ["scripts/alpha158_backtest.py", "--name", "a158_csi500_fin_rolling", "--start", "2023-01-01", "--end", END_DATE, "--t1", "--filter-limit", "--industry-neutral"]),
     ("生成最新选股清单", ["scripts/generate_signal.py", "--top-k", "50"]),
 ]
 

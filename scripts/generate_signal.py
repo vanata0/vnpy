@@ -49,11 +49,27 @@ def code_of(vt_symbol: str) -> str:
     return vt_symbol.rsplit(".", 1)[0]
 
 
+def apply_industry_neutral(signal: pl.DataFrame) -> pl.DataFrame:
+    """截面行业中性化：信号减去所在申万 L1 行业的截面均值"""
+    ind_path = LAB_PATH / "industry.parquet"
+    if not ind_path.exists():
+        print("⚠️  industry.parquet 不存在，跳过行业中性化")
+        return signal
+    industry = pl.read_parquet(str(ind_path)).select(["vt_symbol", "sw_l1_name"])
+    sig = signal.join(industry, on="vt_symbol", how="left")
+    sig = sig.with_columns(pl.col("sw_l1_name").fill_null("其他"))
+    sig = sig.with_columns(
+        (pl.col("signal") - pl.col("signal").mean().over(["datetime", "sw_l1_name"])).alias("signal")
+    )
+    return sig.select(["datetime", "vt_symbol", "signal"])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="生成最新选股清单")
-    parser.add_argument("--name", default="a158_csi500p_fin_rolling", help="信号名称(最优:财务因子滚动版)")
+    parser.add_argument("--name", default="a158_csi500_fin_rolling", help="信号名称(最优:官方CSI500财务因子滚动版)")
     parser.add_argument("--top-k", type=int, default=50, help="选股数量")
     parser.add_argument("--date", default=None, help="指定交易日(YYYY-MM-DD)，默认最新")
+    parser.add_argument("--no-industry-neutral", action="store_true", help="关闭行业中性化(调试用)")
     args = parser.parse_args()
 
     lab = AlphaLab(str(LAB_PATH))
@@ -61,6 +77,10 @@ def main() -> None:
     if signal is None:
         print(f"ERROR: 找不到信号 {args.name}")
         sys.exit(1)
+
+    # 行业中性化(与回测口径一致)
+    if not args.no_industry_neutral:
+        signal = apply_industry_neutral(signal)
 
     # 确定交易日
     if args.date:
