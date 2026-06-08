@@ -103,16 +103,16 @@ def main() -> None:
 
     t0 = time.monotonic()
 
-    # ── Step 1: 数据桥 ──────────────────────────────────────────────────────
+    # ── Step 1: 日线数据更新 ────────────────────────────────────────────────
     if not args.skip_bridge:
-        print("\n=== Step 1: 数据桥 DuckDB→parquet ===", flush=True)
-        r = subprocess.run([PY, "scripts/alpha158_bridge.py"], cwd=str(ROOT))
+        print("\n=== Step 1: Tushare 日线增量更新 ===", flush=True)
+        r = subprocess.run([PY, "scripts/fetch_daily_tushare.py"], cwd=str(ROOT))
         if r.returncode != 0:
-            print("ERROR: 数据桥失败")
+            print("ERROR: Tushare 日线更新失败")
             sys.exit(1)
-        print(f"数据桥完成，耗时 {time.monotonic()-t0:.0f}s", flush=True)
+        print(f"日线更新完成，耗时 {time.monotonic()-t0:.0f}s", flush=True)
     else:
-        print("跳过数据桥（--skip-bridge）", flush=True)
+        print("跳过日线更新（--skip-bridge）", flush=True)
 
     # ── Step 2: 检测新日期 ──────────────────────────────────────────────────
     print("\n=== Step 2: 检测新日期 ===", flush=True)

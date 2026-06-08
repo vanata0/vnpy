@@ -40,7 +40,7 @@ STEPS_INCREMENTAL: list[tuple[str, list[str]]] = [
 ]
 
 STEPS_FULL: list[tuple[str, list[str]]] = [
-    ("数据桥 DuckDB→parquet",       ["scripts/alpha158_bridge.py"]),
+    ("Tushare 日线全量重载",         ["scripts/fetch_daily_tushare.py", "--full"]),
     ("指数 benchmark + 官方成分股", ["scripts/fetch_index_tushare.py"]),
     ("财务因子 point-in-time",      ["scripts/export_financials.py"]),
     ("行业分类导出",                 ["scripts/export_industry.py"]),
