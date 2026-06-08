@@ -24,8 +24,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PY = "/home/oracle/vnpy-venv/bin/python"
 
-# 仅全量模式用；日常增量模式由 alpha158_infer_incremental.py 自动检测最新日期
+# 全量模式回测终止日（仅当 signal 尚未生成时的兜底值）
 FULL_END_DATE = "2026-06-04"
+_END = "@END"  # 运行时替换为 signal 最新日期的占位符
 
 STEPS_INCREMENTAL: list[tuple[str, list[str]]] = [
     ("指数 benchmark + 官方成分股", ["scripts/fetch_index_tushare.py"]),
@@ -34,7 +35,7 @@ STEPS_INCREMENTAL: list[tuple[str, list[str]]] = [
     ("增量推理 + 选股清单 (~5min)",  ["scripts/alpha158_infer_incremental.py"]),
     ("回测 + 净值曲线",              ["scripts/alpha158_backtest.py",
                                       "--name", "a158_csi500_fin_rolling",
-                                      "--start", "2023-01-01", "--end", FULL_END_DATE,
+                                      "--start", "2023-01-01", "--end", _END,
                                       "--t1", "--filter-limit", "--industry-neutral"]),
 ]
 
@@ -52,10 +53,24 @@ STEPS_FULL: list[tuple[str, list[str]]] = [
                                       "--base", "a158_csi500_fin"]),
     ("回测 + 净值曲线",              ["scripts/alpha158_backtest.py",
                                       "--name", "a158_csi500_fin_rolling",
-                                      "--start", "2023-01-01", "--end", FULL_END_DATE,
+                                      "--start", "2023-01-01", "--end", _END,
                                       "--t1", "--filter-limit", "--industry-neutral"]),
     ("生成最新选股清单",             ["scripts/generate_signal.py", "--top-k", "50"]),
 ]
+
+
+def detect_signal_end(signal_name: str = "a158_csi500_fin_rolling") -> str:
+    """读取已保存 rolling signal 的最新交易日，失败时降级为 FULL_END_DATE。"""
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(ROOT))
+        from vnpy.alpha import AlphaLab
+        sig = AlphaLab(str(ROOT / "lab_data")).load_signal(signal_name)
+        if sig is not None:
+            return str(sig["datetime"].max().date())
+    except Exception:
+        pass
+    return FULL_END_DATE
 
 
 def main() -> None:
@@ -70,10 +85,20 @@ def main() -> None:
     print(f"模式: {mode}  步骤数: {len(steps)}")
 
     t0 = time.monotonic()
+    end_date: str | None = None  # 延迟到回测步骤前才检测（先让推理步骤更新 signal）
+
     for i, (name, cmd) in enumerate(steps, 1):
         if i < args.start:
             print(f"[{i}/{len(steps)}] {name} — 跳过", flush=True)
             continue
+
+        # 遇到 @END 占位符时检测最新 signal 日期（推理步骤已完成）
+        if _END in cmd:
+            if end_date is None:
+                end_date = detect_signal_end()
+                print(f"回测终止日自动检测: {end_date}", flush=True)
+            cmd = [end_date if c == _END else c for c in cmd]
+
         print(f"\n{'='*56}\n[{i}/{len(steps)}] {name}\n{'='*56}", flush=True)
         ts = time.monotonic()
         r = subprocess.run([PY, *cmd], cwd=str(ROOT))
