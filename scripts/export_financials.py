@@ -64,7 +64,7 @@ WITH enriched_reports AS (
         total_rev_yoy_gr - LAG(total_rev_yoy_gr, 1) OVER (
             PARTITION BY code, EXTRACT(MONTH FROM report_date)
             ORDER BY report_date
-        ) AS rev_accel
+        ) AS rev_accel,
     FROM financial_report
 ),
 -- 取季报（3/6/9/12月末）的原始累积 YTD 数据
