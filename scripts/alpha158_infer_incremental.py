@@ -43,7 +43,8 @@ VALID_PERIOD = ("2024-01-01", "2024-12-31")
 
 def compute_financial_features(lab_path: Path) -> pl.DataFrame:
     fin = pl.read_parquet(lab_path / "financials.parquet")
-    raw_cols = ["np_yoy", "rev_yoy", "roe", "gross_margin", "net_margin", "debt_ratio", "ocf_ps"]
+    raw_cols = ["np_yoy", "rev_yoy", "roe", "gross_margin", "net_margin", "debt_ratio", "ocf_ps",
+                "delta_roe", "cfo_quality", "rev_accel", "sue", "rev_sue"]
     for c in raw_cols:
         name = f"fin_{c}"
         fin = fin.with_columns(
@@ -51,6 +52,17 @@ def compute_financial_features(lab_path: Path) -> pl.DataFrame:
         )
     feat_names = [f"fin_{c}" for c in raw_cols]
     return fin.select(["datetime", "vt_symbol", *feat_names])
+
+
+def compute_dividend_features(lab_path: Path) -> pl.DataFrame | None:
+    div_path = lab_path / "dividend.parquet"
+    if not div_path.exists():
+        return None
+    div = pl.read_parquet(str(div_path))
+    div = div.with_columns(
+        (pl.col("div_yield_ttm").rank() / pl.col("div_yield_ttm").count()).over("datetime").alias("fin_div_yield")
+    )
+    return div.select(["datetime", "vt_symbol", "fin_div_yield"])
 
 
 # ─── 增量因子计算 ─────────────────────────────────────────────────────────────
@@ -178,7 +190,7 @@ def main() -> None:
         print("无新行，退出。")
         return
 
-    # ── Step 4: 追加财务因子 ────────────────────────────────────────────────
+    # ── Step 4: 追加财务因子 + 股息率因子 ────────────────────────────────────
     print("\n=== Step 4: 追加财务因子 ===", flush=True)
     fin_feat = compute_financial_features(LAB_PATH)
     # 只取新行涉及的日期，避免全量 join
@@ -188,6 +200,7 @@ def main() -> None:
     new_rows = new_rows.join(fin_new, on=["datetime", "vt_symbol"], how="left")
     fin_cols = [c for c in fin_feat.columns if c not in ("datetime", "vt_symbol")]
     new_rows = new_rows.with_columns([pl.col(n).fill_null(0.5) for n in fin_cols])
+
 
     # 列对齐：新行列顺序与现有 infer_df 一致（有 label 列则保留，否则补 NaN）
     existing_cols = dataset.infer_df.columns

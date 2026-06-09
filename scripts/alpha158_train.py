@@ -40,7 +40,7 @@ LAB_PATH = Path(__file__).resolve().parents[1] / "lab_data"
 
 TRAIN_PERIOD = ("2018-01-01", "2023-12-31")
 VALID_PERIOD = ("2024-01-01", "2024-12-31")
-TEST_PERIOD = ("2025-01-01", "2026-06-02")
+TEST_PERIOD = ("2025-01-01", "2026-06-04")
 
 
 def compute_dataset_batched(
@@ -55,51 +55,65 @@ def compute_dataset_batched(
     """
     分批计算 Alpha158 因子并重组成单个 dataset。
 
-    每批独立 load_bar_df + prepare_data(workers=1)，收集 result_df / raw_df，
-    最后 concat 合并、统一加 processor 并 process_data。
+    每批算完立即写临时 parquet 并释放内存（避免全批攒在 RAM 导致 OOM）；
+    最后用 scan_parquet 流式合并，峰值内存 ≈ 1批 + 1个完整 DataFrame。
     """
+    import shutil
+    import tempfile
+
     start, end = TRAIN_PERIOD[0], TEST_PERIOD[1]
     periods = dict(train_period=TRAIN_PERIOD, valid_period=VALID_PERIOD, test_period=TEST_PERIOD)
 
-    result_dfs: list[pl.DataFrame] = []
-    raw_dfs: list[pl.DataFrame] = []
+    import gc
+    tmpdir = Path(tempfile.mkdtemp(prefix="a158_batch_"))
+    raw_paths: list[str] = []
     last_df: pl.DataFrame | None = None
 
     n_batches = (len(symbols) + batch_size - 1) // batch_size
     t0 = time.monotonic()
 
-    for bi in range(n_batches):
-        batch = symbols[bi * batch_size:(bi + 1) * batch_size]
-        df = lab.load_bar_df(batch, Interval.DAILY, start, end, extended_days)
-        if df is None or df.is_empty():
-            print(f"  批 {bi+1}/{n_batches}: 空数据，跳过", flush=True)
-            continue
-        last_df = df
+    try:
+        for bi in range(n_batches):
+            batch = symbols[bi * batch_size:(bi + 1) * batch_size]
+            df = lab.load_bar_df(batch, Interval.DAILY, start, end, extended_days)
+            if df is None or df.is_empty():
+                print(f"  批 {bi+1}/{n_batches}: 空数据，跳过", flush=True)
+                continue
+            last_df = df
 
-        ds = Alpha158(df, **periods)
-        if label_fwd != 2:  # 脚本层覆盖默认 2 日 label(不改核心模块)
-            ds.set_label(f"ts_delay(close, -{label_fwd + 1}) / ts_delay(close, -1) - 1")
-        batch_filters = {s: filters[s] for s in batch if s in filters}
-        ds.prepare_data(filters=batch_filters or None, max_workers=workers)
+            ds = Alpha158(df, **periods)
+            if label_fwd != 2:
+                ds.set_label(f"ts_delay(close, -{label_fwd + 1}) / ts_delay(close, -1) - 1")
+            batch_filters = {s: filters[s] for s in batch if s in filters}
+            ds.prepare_data(filters=batch_filters or None, max_workers=workers)
 
-        result_dfs.append(ds.result_df)
-        raw_dfs.append(ds.raw_df)
-        elapsed = time.monotonic() - t0
-        print(f"  批 {bi+1}/{n_batches}: {len(batch)} 只 | result{tuple(ds.result_df.shape)} "
-              f"raw{tuple(ds.raw_df.shape)} | 累计 {elapsed:.0f}s", flush=True)
+            # 只写 raw_df（~72MB/批，特征列子集），跳过 result_df（~165MB/批）节省磁盘和内存
+            rawp = str(tmpdir / f"raw_{bi:03d}.parquet")
+            ds.raw_df.write_parquet(rawp)
+            raw_paths.append(rawp)
 
-    if not raw_dfs:
-        print("ERROR: 所有批次均为空")
-        sys.exit(1)
+            elapsed = time.monotonic() - t0
+            print(f"  批 {bi+1}/{n_batches}: {len(batch)} 只 | raw{tuple(ds.raw_df.shape)} | 累计 {elapsed:.0f}s", flush=True)
 
-    # 合并所有批
-    merged_result = pl.concat(result_dfs).sort(["datetime", "vt_symbol"])
-    merged_raw = pl.concat(raw_dfs).sort(["datetime", "vt_symbol"])
-    print(f"合并: result{tuple(merged_result.shape)} raw{tuple(merged_raw.shape)}")
+            # 立即释放当批内存
+            del ds, df
+            gc.collect()
+
+        if not raw_paths:
+            print("ERROR: 所有批次均为空")
+            sys.exit(1)
+
+        # 只合并 raw_df（~1.2GB），跳过 result_df（~3GB）避免 OOM
+        print("合并所有批次 raw_df（从磁盘流式读取）...", flush=True)
+        merged_raw = pl.scan_parquet(raw_paths).sort(["datetime", "vt_symbol"]).collect()
+        print(f"合并: raw{tuple(merged_raw.shape)}", flush=True)
+
+    finally:
+        shutil.rmtree(str(tmpdir), ignore_errors=True)
 
     # 用最后一批 df 构造壳实例，随即覆盖数据字段(Alpha158.__init__ 不计算因子)
     shell = Alpha158(last_df, **periods)
-    shell.result_df = merged_result
+    shell.result_df = None   # 跳过 ~3GB result_df：infer/learn 只需 raw_df
     shell.raw_df = merged_raw
     shell.infer_df = merged_raw
     shell.learn_df = merged_raw
@@ -136,8 +150,10 @@ def add_fundamental_features(dataset: Alpha158, lab_path: Path) -> None:
 
     fund_feat = fund.select(["datetime", "vt_symbol", *feat_names])
 
-    for attr in ["raw_df", "infer_df", "learn_df"]:
+    for attr in ["infer_df", "learn_df"]:  # 跳过 raw_df：节省一份 ~1.2GB 副本
         df: pl.DataFrame = getattr(dataset, attr)
+        if df is None:
+            continue
         df = df.join(fund_feat, on=["datetime", "vt_symbol"], how="left")
         df = df.with_columns([pl.col(n).fill_null(0.5) for n in feat_names])
         cols = [c for c in df.columns if c != "label"] + ["label"]
@@ -146,16 +162,43 @@ def add_fundamental_features(dataset: Alpha158, lab_path: Path) -> None:
     print(f"加入 {len(feat_names)} 个基本面因子: {feat_names}")
 
 
+def add_industry_features(dataset: Alpha158, lab_path: Path) -> None:
+    """
+    将申万 L1 行业编码加入 LightGBM 特征（整数 label encoding，0~30）。
+    让模型学习行业内超额收益，而非跨行业的绝对排名。
+    行业 ID 作为普通数值特征，LightGBM 自动找最优行业分割边界。
+    """
+    ind_path = lab_path / "industry.parquet"
+    if not ind_path.exists():
+        print("⚠️  industry.parquet 不存在，跳过行业特征（先运行 export_industry.py）")
+        return
+
+    industry = pl.read_parquet(str(ind_path)).select(["vt_symbol", "industry_id"])
+
+    for attr in ["infer_df", "learn_df"]:  # 跳过 raw_df：节省一份 ~5GB 副本
+        df: pl.DataFrame = getattr(dataset, attr)
+        if df is None:
+            continue
+        df = df.join(industry, on="vt_symbol", how="left")
+        df = df.with_columns(pl.col("industry_id").fill_null(-1).cast(pl.Float64))
+        cols = [c for c in df.columns if c != "label"] + ["label"]
+        setattr(dataset, attr, df.select(cols))
+
+    n_industries = industry["industry_id"].n_unique()
+    print(f"加入行业特征: industry_id (0~{n_industries-1}，31 个申万 L1)")
+
+
 def add_financial_features(dataset: Alpha158, lab_path: Path) -> None:
     """
     把 point-in-time 财务因子(成长/质量)join 到 dataset，作为额外特征。
 
-    7 个因子(净利增速/营收增速/ROE/毛利率/净利率/资产负债率/每股经营现金流)
-    按日截面 rank 到 [0,1]，方向由 LightGBM 自学。缺失填 0.5。这些是量价无法
-    隐含的正交信息(成长+质量)，区别于已证明无用的 pe/pb 粗估值。
+    10 个因子(净利增速/营收增速/ROE/毛利率/净利率/资产负债率/每股经营现金流
+    + delta_roe(ROE同比变化) + cfo_quality(OCF/EPS应计质量) + rev_accel(营收增速加速度))
+    按日截面 rank 到 [0,1]，方向由 LightGBM 自学。缺失填 0.5。
     """
     fin = pl.read_parquet(lab_path / "financials.parquet")
-    raw_cols = ["np_yoy", "rev_yoy", "roe", "gross_margin", "net_margin", "debt_ratio", "ocf_ps"]
+    raw_cols = ["np_yoy", "rev_yoy", "roe", "gross_margin", "net_margin", "debt_ratio", "ocf_ps",
+                "delta_roe", "cfo_quality", "rev_accel", "sue", "rev_sue"]
 
     feat_names: list[str] = []
     for c in raw_cols:
@@ -167,14 +210,45 @@ def add_financial_features(dataset: Alpha158, lab_path: Path) -> None:
 
     fin_feat = fin.select(["datetime", "vt_symbol", *feat_names])
 
-    for attr in ["raw_df", "infer_df", "learn_df"]:
+    for attr in ["infer_df", "learn_df"]:  # 跳过 raw_df：节省一份 ~5GB 副本
         df: pl.DataFrame = getattr(dataset, attr)
+        if df is None:
+            continue
         df = df.join(fin_feat, on=["datetime", "vt_symbol"], how="left")
         df = df.with_columns([pl.col(n).fill_null(0.5) for n in feat_names])
         cols = [c for c in df.columns if c != "label"] + ["label"]
         setattr(dataset, attr, df.select(cols))
 
     print(f"加入 {len(feat_names)} 个财务因子: {feat_names}")
+
+
+def add_dividend_features(dataset: Alpha158, lab_path: Path) -> None:
+    """
+    TTM 股息率因子(pytdx xdxr，point-in-time)。
+    按日截面 rank 到 [0,1]，缺失填 0.5。文件不存在时静默跳过。
+    """
+    div_path = lab_path / "dividend.parquet"
+    if not div_path.exists():
+        print("⚠️  dividend.parquet 不存在，跳过股息率特征（先运行 export_dividend.py）")
+        return
+
+    div = pl.read_parquet(str(div_path))
+    feat_name = "fin_div_yield"
+    div = div.with_columns(
+        (pl.col("div_yield_ttm").rank() / pl.col("div_yield_ttm").count()).over("datetime").alias(feat_name)
+    )
+    div_feat = div.select(["datetime", "vt_symbol", feat_name])
+
+    for attr in ["infer_df", "learn_df"]:
+        df: pl.DataFrame = getattr(dataset, attr)
+        if df is None:
+            continue
+        df = df.join(div_feat, on=["datetime", "vt_symbol"], how="left")
+        df = df.with_columns(pl.col(feat_name).fill_null(0.5))
+        cols = [c for c in df.columns if c != "label"] + ["label"]
+        setattr(dataset, attr, df.select(cols))
+
+    print(f"加入股息率因子: [{feat_name}]")
 
 
 def quick_oos_ic(dataset: Alpha158, signal: pl.DataFrame) -> None:
@@ -205,8 +279,8 @@ def quick_oos_ic(dataset: Alpha158, signal: pl.DataFrame) -> None:
 
 
 def run(name: str, universe: str, limit: int | None, batch_size: int, workers: int,
-        fundamental: bool = False, financial: bool = False, label_fwd: int = 2,
-        extended_days: int = 100) -> None:
+        fundamental: bool = False, financial: bool = False, industry: bool = False,
+        label_fwd: int = 2, extended_days: int = 100) -> None:
     lab = AlphaLab(str(LAB_PATH))
 
     start, end = TRAIN_PERIOD[0], TEST_PERIOD[1]
@@ -228,9 +302,21 @@ def run(name: str, universe: str, limit: int | None, batch_size: int, workers: i
         add_fundamental_features(dataset, LAB_PATH)
     if financial:
         add_financial_features(dataset, LAB_PATH)
+    if industry:
+        add_industry_features(dataset, LAB_PATH)
+
+    # 释放不参与训练的大 DataFrame，降低 pkl 体积和 LGB 峰值内存
+    # result_df / raw_df 只在因子计算中间态用到，训练/推理/rolling 不需要
+    import gc
+    dataset.result_df = None
+    dataset.raw_df = None
+    gc.collect()
 
     lab.save_dataset(name, dataset)
     print(f"数据集已保存: {name}")
+
+    # 再次 GC，确保 save 过程中的临时对象被回收
+    gc.collect()
 
     # 训练 LightGBM
     print("\n--- 训练 LightGBM ---")
@@ -263,6 +349,7 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=1, help="prepare_data 并行进程数")
     parser.add_argument("--fundamental", action="store_true", help="加入基本面因子(ep/bp/换手率/量比)")
     parser.add_argument("--financial", action="store_true", help="加入财务因子(成长/质量，point-in-time)")
+    parser.add_argument("--industry", action="store_true", help="加入申万 L1 行业特征(行业内 alpha 学习)")
     parser.add_argument("--hold", type=int, default=2, help="持有天数(label 周期)，默认 2 日")
     args = parser.parse_args()
 
@@ -274,6 +361,7 @@ def main() -> None:
         workers=args.workers,
         fundamental=args.fundamental,
         financial=args.financial,
+        industry=args.industry,
         label_fwd=args.hold,
     )
 
